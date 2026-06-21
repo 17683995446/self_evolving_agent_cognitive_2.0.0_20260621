@@ -1,5 +1,6 @@
 """
 阶段123: 社交能力强化 — 理论心智 + 协作
+阶段186: BDI框架增强 — 意图×信念×欲望组合行为预测
 
 第一性原理:
 1. 理论心智 (Theory of Mind) = 理解他人的信念、意图、欲望
@@ -8,12 +9,15 @@
 4. 视角采择 = 从他人角度看问题
 5. 情感识别 = 理解他人情感
 6. 信息交换加速进化
+7. BDI框架（阶段186）：行为 = f(信念, 意图, 欲望)
 
 强化内容:
 - TheoryOfMind: 理论心智（建模他人心理状态）
 - PerspectiveTaking: 视角采择
 - Collaboration: 协作引擎
 - TrustModel: 信任模型
+- BDIReasoner（阶段186）: BDI组合推理器
+- ActionPredictor（阶段186）: 基于BDI的行为预测器
 - SocialFirstPrinciplesEngine: 增强
 
 向后兼容: 保留原有 MessageType / AgentIdentity / InterAgentMessage / 接口
@@ -255,15 +259,49 @@ class TheoryOfMind:
 
     def predict_action(self, agent_id: str) -> Optional[Any]:
         """
-        预测行动
+        预测行动（阶段186增强：BDI组合预测）
 
         第一性原理：行动 = 意图 × 信念 × 欲望
+        - 意图（Intention）：Agent计划做什么
+        - 信念（Belief）：Agent认为世界是什么样的
+        - 欲望（Desire）：Agent想要什么
+        - 行为 = 意图在信念约束下追求欲望的结果
+
+        阶段186改进：不再仅返回意图内容，而是组合BDI三要素
         """
         intention = self.get_latest_intention(agent_id)
         if intention is None:
             return None
-        # 简化预测：返回最新意图的内容
-        return intention.content
+
+        belief = self.get_latest_belief(agent_id)
+        desire = self.get_latest_desire(agent_id)
+
+        # 如果只有意图，退化为旧行为（向后兼容）
+        if belief is None and desire is None:
+            return intention.content
+
+        # BDI组合预测
+        # 意图是主要驱动力，信念提供约束，欲望提供方向
+        predicted = {
+            "intention": intention.content,
+            "confidence": intention.confidence,
+        }
+
+        if belief is not None:
+            predicted["belief_context"] = belief.content
+            # 信念修正意图置信度：如果信念与意图冲突，降低置信度
+            predicted["confidence"] *= (0.5 + 0.5 * belief.confidence)
+
+        if desire is not None:
+            predicted["desire"] = desire.content
+            # 欲望增强意图：欲望置信度高时提升行为概率
+            predicted["confidence"] = min(1.0, predicted["confidence"] * (0.7 + 0.3 * desire.confidence))
+
+        # 综合预测：意图内容 + BDI置信度
+        predicted["predicted_action"] = intention.content
+        predicted["bdi_confidence"] = predicted.pop("confidence")
+
+        return predicted
 
     def clear_agent(self, agent_id: str) -> None:
         """清除Agent的心理状态"""
@@ -966,6 +1004,80 @@ class SocialFirstPrinciplesEngine:
         """获取协作引擎"""
         return self._collaboration
 
+    # ============================================================
+    # 阶段186新增：BDI框架接口
+    # ============================================================
+
+    def build_bdi_state(self, agent_id: str) -> BDIState:
+        """
+        从理论心智模型构建Agent的BDI状态
+
+        第一性原理：将心理状态映射为BDI三组件
+        - Belief ← 心智模型中的信念
+        - Desire ← 心智模型中的欲望
+        - Intention ← 心智模型中的意图
+        """
+        beliefs = [s.content for s in self._theory_of_mind.get_mental_states(agent_id, MentalStateType.BELIEF)]
+        desires = [s.content for s in self._theory_of_mind.get_mental_states(agent_id, MentalStateType.DESIRE)]
+        intentions = [s.content for s in self._theory_of_mind.get_mental_states(agent_id, MentalStateType.INTENTION)]
+
+        # 从最新状态提取置信度
+        belief_conf = 0.5
+        desire_conf = 0.5
+        intention_conf = 0.5
+
+        latest_belief = self._theory_of_mind.get_latest_belief(agent_id)
+        if latest_belief:
+            belief_conf = latest_belief.confidence
+
+        latest_desire = self._theory_of_mind.get_latest_desire(agent_id)
+        if latest_desire:
+            desire_conf = latest_desire.confidence
+
+        latest_intention = self._theory_of_mind.get_latest_intention(agent_id)
+        if latest_intention:
+            intention_conf = latest_intention.confidence
+
+        return BDIState(
+            agent_id=agent_id,
+            beliefs=beliefs,
+            desires=desires,
+            intentions=intentions,
+            belief_confidence=belief_conf,
+            desire_strength=desire_conf,
+            intention_commitment=intention_conf,
+        )
+
+    def predict_action_bdi(
+        self,
+        agent_id: str,
+        candidate_actions: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        基于BDI框架预测Agent行为
+
+        第一性原理：组合信念、欲望、意图三要素预测行为
+        - 比简单predict_action提供更丰富的推理过程
+        - 支持候选行动评估
+        """
+        bdi_state = self.build_bdi_state(agent_id)
+        predictor = ActionPredictor()
+        return predictor.predict(bdi_state, candidate_actions)
+
+    def predict_action_sequence(
+        self,
+        agent_id: str,
+        steps: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """
+        预测Agent的行动序列
+
+        第一性原理：基于意图队列预测多步行动
+        """
+        bdi_state = self.build_bdi_state(agent_id)
+        predictor = ActionPredictor()
+        return predictor.predict_sequence(bdi_state, steps)
+
 
 # ============================================================
 # 便捷函数（向后兼容 + 新增）
@@ -994,3 +1106,283 @@ def create_trust_model(initial_trust: float = 0.5) -> TrustModel:
 def create_collaboration(trust_model: Optional[TrustModel] = None) -> Collaboration:
     """创建协作引擎"""
     return Collaboration(trust_model=trust_model)
+
+
+# ============================================================
+# 阶段186: BDI组合推理器
+# ============================================================
+
+@dataclass
+class BDIState:
+    """
+    BDI状态（阶段186）
+
+    第一性原理：BDI模型将Agent心智分为三个组件
+    - Belief：对世界状态的信念
+    - Desire：期望达成的目标
+    - Intention：承诺执行的行动
+    """
+    agent_id: str
+    beliefs: List[Any] = field(default_factory=list)
+    desires: List[Any] = field(default_factory=list)
+    intentions: List[Any] = field(default_factory=list)
+    belief_confidence: float = 0.5
+    desire_strength: float = 0.5
+    intention_commitment: float = 0.5
+
+    @property
+    def coherence(self) -> float:
+        """
+        BDI一致性：信念、欲望、意图之间的协调程度
+
+        第一性原理：高一致性的BDI状态更可能产生可预测的行为
+        - 一致性 = 三者置信度的几何平均
+        """
+        return (
+            self.belief_confidence
+            * self.desire_strength
+            * self.intention_commitment
+        ) ** (1.0 / 3.0)
+
+
+class BDIReasoner:
+    """
+    BDI组合推理器（阶段186）
+
+    第一性原理：
+    - 行为 = 意图在信念约束下追求欲望的结果
+    - 信念过滤可行行动（不可能的行动被排除）
+    - 欲望评估行动价值（高价值的行动被优先选择）
+    - 意图确定行动承诺（已承诺的行动被执行）
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+
+    def reason(
+        self,
+        beliefs: List[Any],
+        desires: List[Any],
+        intentions: List[Any],
+        belief_confidence: float = 0.5,
+        desire_strength: float = 0.5,
+        intention_commitment: float = 0.5,
+    ) -> Dict[str, Any]:
+        """
+        BDI组合推理
+
+        第一性原理：
+        1. 信念约束：从意图中排除与信念冲突的行动
+        2. 欲望导向：选择最接近欲望的行动
+        3. 意图承诺：执行已承诺的行动
+
+        Returns:
+            {
+                "recommended_action": 推荐行动,
+                "bdi_confidence": BDI置信度,
+                "coherence": 一致性,
+                "reasoning_trace": 推理过程,
+            }
+        """
+        with self._lock:
+            reasoning_trace: List[str] = []
+
+            # 步骤1：意图是行为的主要驱动力
+            if not intentions:
+                reasoning_trace.append("无意图：无法预测行为")
+                return {
+                    "recommended_action": None,
+                    "bdi_confidence": 0.0,
+                    "coherence": 0.0,
+                    "reasoning_trace": reasoning_trace,
+                }
+
+            primary_intention = intentions[-1]
+            reasoning_trace.append(f"主要意图: {primary_intention}")
+
+            # 步骤2：信念约束
+            bdi_confidence = intention_commitment
+            if beliefs:
+                latest_belief = beliefs[-1]
+                reasoning_trace.append(f"信念约束: {latest_belief}")
+                # 信念置信度修正行为置信度
+                bdi_confidence *= (0.5 + 0.5 * belief_confidence)
+            else:
+                reasoning_trace.append("无信念约束")
+
+            # 步骤3：欲望导向
+            if desires:
+                latest_desire = desires[-1]
+                reasoning_trace.append(f"欲望导向: {latest_desire}")
+                # 欲望增强行为置信度
+                bdi_confidence = min(1.0, bdi_confidence * (0.7 + 0.3 * desire_strength))
+            else:
+                reasoning_trace.append("无欲望导向")
+
+            # 一致性
+            coherence = (
+                belief_confidence * desire_strength * intention_commitment
+            ) ** (1.0 / 3.0)
+
+            return {
+                "recommended_action": primary_intention,
+                "bdi_confidence": bdi_confidence,
+                "coherence": coherence,
+                "reasoning_trace": reasoning_trace,
+            }
+
+    def evaluate_action(
+        self,
+        action: Any,
+        bdi_state: BDIState,
+    ) -> Dict[str, Any]:
+        """
+        评估行动的BDI适合度
+
+        第一性原理：
+        - 行动与意图的一致性（承诺度）
+        - 行动与信念的兼容性（可行性）
+        - 行动与欲望的对齐度（价值）
+        """
+        with self._lock:
+            # 意图一致性
+            intention_alignment = 1.0 if action in bdi_state.intentions else 0.3
+
+            # 信念兼容性（简化：检查行动是否在信念列表中）
+            belief_compatibility = 0.8  # 默认高兼容
+            if bdi_state.beliefs and action not in bdi_state.beliefs:
+                belief_compatibility = 0.5
+
+            # 欲望对齐
+            desire_alignment = 1.0 if action in bdi_state.desires else 0.4
+
+            # 综合适合度
+            suitability = (
+                intention_alignment * bdi_state.intention_commitment
+                + belief_compatibility * bdi_state.belief_confidence
+                + desire_alignment * bdi_state.desire_strength
+            ) / 3.0
+
+            return {
+                "action": action,
+                "intention_alignment": intention_alignment,
+                "belief_compatibility": belief_compatibility,
+                "desire_alignment": desire_alignment,
+                "overall_suitability": suitability,
+            }
+
+
+class ActionPredictor:
+    """
+    基于BDI的行为预测器（阶段186）
+
+    第一性原理：
+    - 行为预测 = 基于BDI状态推断最可能的行动
+    - 预测置信度 = BDI一致性 × 意图承诺度
+    - 多步预测 = 基于当前BDI状态预测行动序列
+    """
+
+    def __init__(self, bdi_reasoner: Optional[BDIReasoner] = None):
+        self._bdi_reasoner = bdi_reasoner or BDIReasoner()
+        self._lock = threading.RLock()
+
+    def predict(
+        self,
+        bdi_state: BDIState,
+        candidate_actions: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        预测最可能的行动
+
+        Args:
+            bdi_state: BDI状态
+            candidate_actions: 候选行动列表（None则使用意图作为候选）
+
+        Returns:
+            {
+                "predicted_action": 预测行动,
+                "confidence": 预测置信度,
+                "alternatives": 备选行动及适合度,
+            }
+        """
+        with self._lock:
+            # BDI推理
+            reasoning = self._bdi_reasoner.reason(
+                beliefs=bdi_state.beliefs,
+                desires=bdi_state.desires,
+                intentions=bdi_state.intentions,
+                belief_confidence=bdi_state.belief_confidence,
+                desire_strength=bdi_state.desire_strength,
+                intention_commitment=bdi_state.intention_commitment,
+            )
+
+            # 如果有候选行动，评估每个
+            alternatives: List[Dict[str, Any]] = []
+            if candidate_actions:
+                for action in candidate_actions:
+                    evaluation = self._bdi_reasoner.evaluate_action(action, bdi_state)
+                    alternatives.append(evaluation)
+
+                # 按适合度排序
+                alternatives.sort(key=lambda x: x["overall_suitability"], reverse=True)
+
+                # 最适合的行动
+                if alternatives:
+                    best = alternatives[0]
+                    return {
+                        "predicted_action": best["action"],
+                        "confidence": best["overall_suitability"] * bdi_state.coherence,
+                        "alternatives": alternatives,
+                        "reasoning": reasoning,
+                    }
+
+            # 无候选行动时使用BDI推理结果
+            return {
+                "predicted_action": reasoning["recommended_action"],
+                "confidence": reasoning["bdi_confidence"] * bdi_state.coherence,
+                "alternatives": alternatives,
+                "reasoning": reasoning,
+            }
+
+    def predict_sequence(
+        self,
+        bdi_state: BDIState,
+        steps: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """
+        预测行动序列
+
+        第一性原理：基于当前BDI状态预测未来N步行动
+        - 每步预测后，假设意图被执行并从意图列表移除
+        - 置信度随步数衰减
+        """
+        with self._lock:
+            predictions: List[Dict[str, Any]] = []
+            current_intentions = list(bdi_state.intentions)
+
+            for step in range(steps):
+                if not current_intentions:
+                    break
+
+                # 创建临时BDI状态
+                temp_state = BDIState(
+                    agent_id=bdi_state.agent_id,
+                    beliefs=bdi_state.beliefs,
+                    desires=bdi_state.desires,
+                    intentions=current_intentions,
+                    belief_confidence=bdi_state.belief_confidence,
+                    desire_strength=bdi_state.desire_strength,
+                    intention_commitment=bdi_state.intention_commitment,
+                )
+
+                prediction = self.predict(temp_state)
+                # 置信度随步数衰减
+                prediction["step"] = step
+                prediction["confidence"] *= (0.8 ** step)
+                predictions.append(prediction)
+
+                # 移除已执行的意图
+                if current_intentions:
+                    current_intentions.pop()
+
+            return predictions

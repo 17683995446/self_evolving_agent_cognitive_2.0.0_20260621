@@ -1,5 +1,6 @@
 """
 阶段115: 驱力系统强化 — 动态目标 + 优先级仲裁
+阶段188: 行为-驱力追溯链路增强
 
 第一性原理:
 1. 动机源于差距：没有差距就没有行动的必要
@@ -7,6 +8,8 @@
 3. 三大驱力是生存的基础：安全、收益、能效
 4. 目标是动态的：随环境变化、有时间约束、有优先级
 5. 资源有限：必须仲裁多个竞争目标，选择最优行动
+6. 行为-驱力追溯（阶段188）：每个行为可追溯到其服务的驱力缺口
+7. 因果链路（阶段188）：行为→目标→驱力缺口的完整追溯
 
 强化内容:
 - Goal: 动态目标（带截止时间、优先级、依赖、验收标准）
@@ -14,6 +17,7 @@
 - PriorityArbitrator: 多因子优先级仲裁
   因子: 紧急度 × 重要性 × 可行性 / 资源成本
 - EnhancedDriveEngine: 整合动态目标与仲裁
+- ActionDriveTracer（阶段188）: 行为-驱力因果追溯器
 
 向后兼容: 保留原有 DriveFirstPrinciplesEngine 接口
 """
@@ -621,8 +625,36 @@ class DriveFirstPrinciplesEngine:
             return safe_gap > 0.01 or gain_gap > 0.01 or eff_gap > 0.01
 
     def trace_action_to_gap(self, action_description: str) -> Optional[DriveGap]:
-        """追溯行为到驱力缺口"""
-        return self.get_dominant_gap()
+        """
+        追溯行为到驱力缺口（阶段188增强：因果链路追溯）
+
+        第一性原理：
+        - 阶段115：直接返回dominant gap（无真正追溯）
+        - 阶段188：通过行为-目标-驱力因果链路追溯
+          1. 行为 → 关联目标（通过action_description匹配）
+          2. 目标 → 驱力类型（Goal.drive_type）
+          3. 驱力类型 → 当前缺口
+        """
+        # 阶段188：通过目标追溯
+        with self._lock:
+            # 查找与行为描述相关的活跃目标
+            active_goals = self._goal_manager.get_active_goals()
+            matched_goal = None
+            for goal in active_goals:
+                # 简化匹配：行为描述包含目标ID或名称关键词
+                if goal.goal_id in action_description or \
+                   any(kw in action_description for kw in goal.name.split()):
+                    matched_goal = goal
+                    break
+
+            if matched_goal is not None:
+                # 通过目标的驱力类型找到对应缺口
+                for gap in self._gaps.values():
+                    if gap.drive_type == matched_goal.drive_type:
+                        return gap
+
+            # 退化为dominant gap（向后兼容）
+            return self.get_dominant_gap()
 
     def get_stats(self) -> Dict[str, Any]:
         """获取统计"""
@@ -768,6 +800,53 @@ class DriveFirstPrinciplesEngine:
         """获取仲裁器（高级用法）"""
         return self._arbitrator
 
+    # ============================================================
+    # 阶段188新增：行为-驱力追溯接口
+    # ============================================================
+
+    def trace_action_to_gap_detailed(self, action_description: str) -> ActionDriveTrace:
+        """
+        详细的行为-驱力追溯（阶段188）
+
+        第一性原理：返回完整的追溯链路，包括匹配的目标和驱力缺口
+        """
+        tracer = ActionDriveTracer()
+
+        # 构建驱力类型→缺口的映射
+        with self._lock:
+            gaps_by_type: Dict[DriveType, DriveGap] = {
+                gap.drive_type: gap for gap in self._gaps.values()
+            }
+
+        return tracer.trace(action_description, self._goal_manager, gaps_by_type)
+
+    def register_action_goal(self, action_keyword: str, goal_id: str) -> None:
+        """
+        注册行为-目标关联（阶段188）
+
+        第一性原理：显式注册行为与目标的关联，提高追溯精度
+        """
+        # 存储在引擎实例上
+        if not hasattr(self, "_action_tracer"):
+            self._action_tracer = ActionDriveTracer()
+        self._action_tracer.register_action_goal(action_keyword, goal_id)
+
+    def get_action_drive_trace(self, action_description: str) -> ActionDriveTrace:
+        """
+        获取行为-驱力追溯结果（阶段188）
+
+        第一性原理：使用已注册的映射进行精确追溯
+        """
+        if not hasattr(self, "_action_tracer"):
+            self._action_tracer = ActionDriveTracer()
+
+        with self._lock:
+            gaps_by_type: Dict[DriveType, DriveGap] = {
+                gap.drive_type: gap for gap in self._gaps.values()
+            }
+
+        return self._action_tracer.trace(action_description, self._goal_manager, gaps_by_type)
+
 
 # ============================================================
 # 便捷函数（向后兼容 + 新增）
@@ -831,3 +910,139 @@ def create_goal(
         dependencies=dependencies or set(),
         acceptance_criteria=acceptance_criteria,
     )
+
+
+# ============================================================
+# 阶段188: 行为-驱力因果追溯器
+# ============================================================
+
+@dataclass
+class ActionDriveTrace:
+    """
+    行为-驱力追溯结果（阶段188）
+
+    第一性原理：记录行为到驱力的完整因果链路
+    """
+    action_description: str
+    matched_goal: Optional[Goal] = None
+    matched_gap: Optional[DriveGap] = None
+    drive_type: Optional[DriveType] = None
+    trace_path: List[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+
+class ActionDriveTracer:
+    """
+    行为-驱力因果追溯器（阶段188）
+
+    第一性原理：
+    - 每个行为都应能追溯到其服务的驱力缺口
+    - 追溯链路：行为 → 目标 → 驱力类型 → 驱力缺口
+    - 无追溯链路的行为是"无动机行为"（低优先级）
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        # 行为-目标关联映射
+        self._action_goal_map: Dict[str, str] = {}  # action_keyword -> goal_id
+
+    def register_action_goal(self, action_keyword: str, goal_id: str) -> None:
+        """注册行为-目标关联"""
+        with self._lock:
+            self._action_goal_map[action_keyword] = goal_id
+
+    def trace(
+        self,
+        action_description: str,
+        goal_manager: GoalManager,
+        gaps: Dict[DriveType, DriveGap],
+    ) -> ActionDriveTrace:
+        """
+        追溯行为到驱力缺口
+
+        第一性原理：
+        1. 行为描述 → 匹配目标（通过关键词或注册映射）
+        2. 目标 → 驱力类型（Goal.drive_type）
+        3. 驱力类型 → 驱力缺口
+
+        Returns:
+            ActionDriveTrace: 追溯结果
+        """
+        with self._lock:
+            trace_path: List[str] = [f"行为: {action_description}"]
+            confidence = 0.0
+
+            # 步骤1：匹配目标
+            matched_goal = None
+
+            # 1a. 通过注册映射匹配
+            for keyword, goal_id in self._action_goal_map.items():
+                if keyword in action_description:
+                    goal = goal_manager.get_goal(goal_id)
+                    if goal is not None:
+                        matched_goal = goal
+                        trace_path.append(f"→ 匹配目标(注册): {goal.name}")
+                        confidence = 0.9
+                        break
+
+            # 1b. 通过目标名称关键词匹配
+            if matched_goal is None:
+                active_goals = goal_manager.get_active_goals()
+                for goal in active_goals:
+                    if goal.goal_id in action_description or \
+                       any(kw in action_description for kw in goal.name.split()):
+                        matched_goal = goal
+                        trace_path.append(f"→ 匹配目标(名称): {goal.name}")
+                        confidence = 0.7
+                        break
+
+            # 1c. 通过目标名称子串匹配
+            if matched_goal is None:
+                active_goals = goal_manager.get_active_goals()
+                for goal in active_goals:
+                    if goal.name in action_description:
+                        matched_goal = goal
+                        trace_path.append(f"→ 匹配目标(名称子串): {goal.name}")
+                        confidence = 0.6
+                        break
+
+            if matched_goal is None:
+                trace_path.append("→ 无匹配目标（无动机行为）")
+                return ActionDriveTrace(
+                    action_description=action_description,
+                    trace_path=trace_path,
+                    confidence=0.0,
+                )
+
+            # 步骤2：目标 → 驱力类型
+            drive_type = matched_goal.drive_type
+            trace_path.append(f"→ 驱力类型: {drive_type.name}")
+
+            # 步骤3：驱力类型 → 驱力缺口
+            matched_gap = gaps.get(drive_type)
+            if matched_gap is not None:
+                trace_path.append(
+                    f"→ 驱力缺口: {drive_type.name} "
+                    f"(当前={matched_gap.current_level:.2f}, "
+                    f"目标={matched_gap.target_level:.2f}, "
+                    f"紧迫度={matched_gap.urgency:.2f})"
+                )
+                # 置信度受缺口紧迫度影响
+                confidence *= (0.5 + 0.5 * matched_gap.urgency)
+            else:
+                trace_path.append(f"→ 无对应驱力缺口: {drive_type.name}")
+                confidence *= 0.5
+
+            return ActionDriveTrace(
+                action_description=action_description,
+                matched_goal=matched_goal,
+                matched_gap=matched_gap,
+                drive_type=drive_type,
+                trace_path=trace_path,
+                confidence=confidence,
+            )
+
+    def get_registered_mappings(self) -> Dict[str, str]:
+        """获取已注册的行为-目标映射"""
+        with self._lock:
+            return dict(self._action_goal_map)

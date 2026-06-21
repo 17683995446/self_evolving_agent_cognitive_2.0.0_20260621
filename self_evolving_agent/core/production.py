@@ -447,21 +447,33 @@ class RateLimiter:
 
 
 # ============================================================
-# 熔断器
+# 熔断器（阶段190: 委托给统一的circuit_breaker.CircuitBreaker）
 # ============================================================
 
-class CircuitState(Enum):
-    """熔断器状态"""
-    CLOSED = "closed"      # 正常，允许请求
-    OPEN = "open"          # 熔断，拒绝请求
-    HALF_OPEN = "half_open"  # 半开，试探性允许
+try:
+    from .circuit_breaker import (
+        CircuitBreaker as _UnifiedCircuitBreaker,
+        CircuitState as _UnifiedCircuitState,
+    )
+except ImportError:
+    from circuit_breaker import (
+        CircuitBreaker as _UnifiedCircuitBreaker,
+        CircuitState as _UnifiedCircuitState,
+    )
+
+
+# 阶段190: CircuitState直接别名到统一实现（Python枚举有成员时不能被继承）
+CircuitState = _UnifiedCircuitState
 
 
 class CircuitBreaker:
     """
-    熔断器
+    熔断器（阶段190: 委托给统一的circuit_breaker.CircuitBreaker）
 
-    当失败率达到阈值时熔断，保护下游服务。
+    第一性原理：
+    - 熔断逻辑应只有一份实现（DRY原则）
+    - 本类保留原有接口，内部委托给统一熔断器
+    - 当失败率达到阈值时熔断，保护下游服务
     """
 
     def __init__(
@@ -470,88 +482,90 @@ class CircuitBreaker:
         recovery_timeout: float = 60.0,
         half_open_max_calls: int = 3,
     ):
+        # 委托给统一熔断器（recovery_timeout是秒，需转为毫秒）
+        self._breaker = _UnifiedCircuitBreaker(
+            name="production",
+            failure_threshold=failure_threshold,
+            recovery_timeout_ms=recovery_timeout * 1000.0,
+            half_open_max_calls=half_open_max_calls,
+            success_threshold=half_open_max_calls,
+        )
+        # 保留原有属性名以兼容外部访问
         self._failure_threshold = failure_threshold
         self._recovery_timeout = recovery_timeout
         self._half_open_max_calls = half_open_max_calls
-        self._state = CircuitState.CLOSED
-        self._failure_count = 0
-        self._success_count = 0
-        self._last_failure_time: Optional[float] = None
-        self._half_open_calls = 0
         self._lock = threading.RLock()
 
     @property
     def state(self) -> CircuitState:
-        with self._lock:
-            self._check_state_transition()
-            return self._state
+        """当前状态（检查超时转换）"""
+        self._check_state_transition()
+        return CircuitState(self._breaker.state)
 
     def _check_state_transition(self) -> None:
-        """检查状态转换"""
-        if self._state == CircuitState.OPEN:
-            if self._last_failure_time:
-                elapsed = time.time() - self._last_failure_time
-                if elapsed >= self._recovery_timeout:
-                    self._state = CircuitState.HALF_OPEN
-                    self._half_open_calls = 0
+        """检查状态转换（向后兼容方法）"""
+        if self._breaker.state == _UnifiedCircuitState.OPEN:
+            import time as _time
+            if self._breaker._last_failure_time is not None:
+                elapsed_ms = (_time.time() - self._breaker._last_failure_time) * 1000
+                if elapsed_ms >= self._breaker.recovery_timeout_ms:
+                    with self._breaker._lock:
+                        if self._breaker._state == _UnifiedCircuitState.OPEN:
+                            self._breaker._state = _UnifiedCircuitState.HALF_OPEN
+                            self._breaker._half_open_calls = 0
+                            self._breaker._success_count = 0
+                            self._breaker._state_changes += 1
+
+    @property
+    def _failure_count(self) -> int:
+        """失败计数（向后兼容属性）"""
+        return self._breaker._failure_count
+
+    @property
+    def _success_count(self) -> int:
+        """成功计数（向后兼容属性）"""
+        return self._breaker._success_count
+
+    @property
+    def _half_open_calls(self) -> int:
+        """半开调用计数（向后兼容属性）"""
+        return self._breaker._half_open_calls
+
+    @property
+    def _last_failure_time(self) -> Optional[float]:
+        """最后失败时间（向后兼容属性）"""
+        return self._breaker._last_failure_time
 
     def can_execute(self) -> bool:
-        """是否可以执行"""
-        with self._lock:
-            self._check_state_transition()
-            if self._state == CircuitState.CLOSED:
-                return True
-            if self._state == CircuitState.HALF_OPEN:
-                if self._half_open_calls < self._half_open_max_calls:
-                    self._half_open_calls += 1
-                    return True
-                return False
-            return False  # OPEN
+        """是否可以执行（委托给统一熔断器）"""
+        return self._breaker.can_execute()
 
     def record_success(self) -> None:
-        """记录成功"""
-        with self._lock:
-            if self._state == CircuitState.HALF_OPEN:
-                self._success_count += 1
-                if self._success_count >= self._half_open_max_calls:
-                    # 恢复
-                    self._state = CircuitState.CLOSED
-                    self._failure_count = 0
-                    self._success_count = 0
-            else:
-                self._failure_count = 0
+        """记录成功（委托给统一熔断器）"""
+        self._breaker.record_success()
 
     def record_failure(self) -> None:
-        """记录失败"""
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-            if self._state == CircuitState.HALF_OPEN:
-                # 半开状态失败，重新熔断
-                self._state = CircuitState.OPEN
-                self._success_count = 0
-            elif self._failure_count >= self._failure_threshold:
-                self._state = CircuitState.OPEN
+        """记录失败（委托给统一熔断器）"""
+        self._breaker.record_failure()
 
     def reset(self) -> None:
-        """重置熔断器"""
-        with self._lock:
-            self._state = CircuitState.CLOSED
-            self._failure_count = 0
-            self._success_count = 0
-            self._last_failure_time = None
-            self._half_open_calls = 0
+        """重置熔断器（委托给统一熔断器）"""
+        self._breaker.reset()
 
     def stats(self) -> Dict[str, Any]:
-        """获取统计"""
-        with self._lock:
-            return {
-                "state": self._state.value,
-                "failure_count": self._failure_count,
-                "success_count": self._success_count,
-                "failure_threshold": self._failure_threshold,
-                "recovery_timeout": self._recovery_timeout,
-            }
+        """获取统计（委托给统一熔断器，保持原有字段格式）"""
+        unified_stats = self._breaker.get_stats()
+        return {
+            "state": unified_stats.get("state", "closed"),
+            "failure_count": unified_stats.get("failure_count", 0),
+            "success_count": unified_stats.get("success_count", 0),
+            "failure_threshold": self._failure_threshold,
+            "recovery_timeout": self._recovery_timeout,
+        }
+
+    def get_stats(self) -> Dict[str, Any]:
+        """获取统计（别名，与统一熔断器接口一致）"""
+        return self.stats()
 
 
 # ============================================================

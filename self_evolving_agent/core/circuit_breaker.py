@@ -1,5 +1,6 @@
 """
 阶段38: 熔断接口标准化
+阶段190: 统一熔断器 — 支持call()和can_execute()/record_*()双模式
 
 第一性原理:
 1. 故障会传播。当一个组件持续失败时，继续向它发送请求会浪费资源并可能拖垮整个系统
@@ -11,6 +12,7 @@
 - 可配置：失败阈值、恢复超时、半开请求数
 - 可观测：状态、失败率、切换次数
 - 与重试配合：熔断打开时直接失败，不重试
+- 阶段190：统一双模式接口，消除recovery.py和production.py的重复实现
 """
 
 from dataclasses import dataclass, field
@@ -217,6 +219,53 @@ class CircuitBreaker:
             self._success_count = 0
             self._half_open_calls = 0
             self._last_failure_time = None
+
+    # ============================================================
+    # 阶段190: 手动模式接口（统一can_execute/record_*模式）
+    # ============================================================
+
+    def can_execute(self) -> bool:
+        """
+        检查是否允许执行（手动模式）
+
+        第一性原理：与call()模式共享同一状态机，但允许调用方
+        自行管理操作执行和结果记录。
+
+        Returns:
+            True if execution is allowed, False if circuit is open
+        """
+        with self._lock:
+            self._total_calls += 1
+
+            # 检查是否需要从OPEN转到HALF_OPEN
+            if self._state == CircuitState.OPEN:
+                if self._last_failure_time is not None:
+                    elapsed_ms = (time.time() - self._last_failure_time) * 1000
+                    if elapsed_ms >= self.recovery_timeout_ms:
+                        self._state = CircuitState.HALF_OPEN
+                        self._half_open_calls = 0
+                        self._success_count = 0
+                        self._state_changes += 1
+                    else:
+                        return False
+                else:
+                    return False
+
+            # HALF_OPEN状态限制请求数
+            if self._state == CircuitState.HALF_OPEN:
+                if self._half_open_calls >= self.half_open_max_calls:
+                    return False
+                self._half_open_calls += 1
+
+            return True
+
+    def record_success(self) -> None:
+        """记录成功（手动模式）"""
+        self._on_success()
+
+    def record_failure(self) -> None:
+        """记录失败（手动模式）"""
+        self._on_failure()
 
 
 # ============================================================

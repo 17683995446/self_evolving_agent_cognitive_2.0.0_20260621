@@ -1,5 +1,6 @@
 """
 阶段132: 可观测性增强层 — 日志、指标、追踪、健康检查、告警
+阶段190: 统一日志 — StructuredLogger委托给logging.py统一实现
 
 第一性原理:
 1. 可观测性 = 日志 + 指标 + 追踪（Observability三支柱）
@@ -14,9 +15,10 @@
 - 结构化：所有可观测数据均为结构化格式
 - 可组合：各组件可独立使用，也可集成
 - 低开销：可观测性不应成为性能瓶颈
+- 阶段190：日志统一委托给logging.py，消除重复实现
 
 提供:
-- LogLevel/LogRecord/StructuredLogger: 结构化日志
+- LogLevel/LogRecord/StructuredLogger: 结构化日志（委托给logging.py）
 - Metric/MetricsCollector: 指标收集
 - TraceSpan/Tracer: 分布式追踪
 - HealthStatus/HealthChecker: 健康检查
@@ -35,21 +37,30 @@ from collections import defaultdict, deque
 
 
 # ============================================================
-# 结构化日志
+# 结构化日志（阶段190: 委托给logging.py统一实现）
 # ============================================================
 
-class LogLevel(Enum):
-    """日志级别"""
-    DEBUG = 10
-    INFO = 20
-    WARNING = 30
-    ERROR = 40
-    CRITICAL = 50
+try:
+    from .logging import (
+        LogLevel as _UnifiedLogLevel,
+        StructuredLogger as _UnifiedLogger,
+        LogManager as _UnifiedLogManager,
+    )
+except ImportError:
+    from logging import (
+        LogLevel as _UnifiedLogLevel,
+        StructuredLogger as _UnifiedLogger,
+        LogManager as _UnifiedLogManager,
+    )
+
+
+# 阶段190: LogLevel直接别名到统一实现（Python枚举有成员时不能被继承）
+LogLevel = _UnifiedLogLevel
 
 
 @dataclass
 class LogRecord:
-    """日志记录"""
+    """日志记录（保留原有接口，用于get_records查询）"""
     timestamp: float
     level: LogLevel
     logger_name: str
@@ -75,7 +86,13 @@ class LogRecord:
 
 class StructuredLogger:
     """
-    结构化日志器
+    结构化日志器（阶段190: 委托给logging.py统一实现）
+
+    第一性原理：
+    - 日志逻辑应只有一份实现（DRY原则）
+    - 本类保留原有接口（handlers, get_records, get_stats, clear）
+    - 实际日志记录委托给logging.py的StructuredLogger
+    - 本地保留内存缓冲以支持get_records查询
 
     支持结构化字段、日志级别过滤、多处理器。
     线程安全。
@@ -94,6 +111,9 @@ class StructuredLogger:
         self._records: deque = deque(maxlen=10000)  # 内存日志缓冲
         self._counters: Dict[str, int] = defaultdict(int)
 
+        # 阶段190: 委托给统一日志器（LogManager是单例，需实例化）
+        self._unified_logger = _UnifiedLogManager().get_logger(name)
+
     @property
     def name(self) -> str:
         return self._name
@@ -106,6 +126,7 @@ class StructuredLogger:
         """设置日志级别"""
         with self._lock:
             self._level = level
+            self._unified_logger.set_min_level(level)
 
     def add_handler(self, handler: Callable[[LogRecord], None]) -> None:
         """添加日志处理器"""
@@ -149,7 +170,7 @@ class StructuredLogger:
         fields: Dict[str, Any],
         exception: Optional[str] = None,
     ) -> None:
-        """记录日志"""
+        """记录日志（阶段190: 同时委托给统一日志器和本地缓冲）"""
         if level.value < self._level.value:
             return
 
@@ -162,16 +183,33 @@ class StructuredLogger:
             exception=exception,
         )
 
+        # 本地缓冲（支持get_records查询）
         with self._lock:
             self._records.append(record)
             self._counters[level.name] += 1
             handlers = list(self._handlers)
 
+        # 调用本地handlers
         for handler in handlers:
             try:
                 handler(record)
             except Exception:
                 pass  # 日志处理器异常不应影响主流程
+
+        # 阶段190: 委托给统一日志器
+        try:
+            if level == LogLevel.DEBUG:
+                self._unified_logger.debug(message, **fields)
+            elif level == LogLevel.INFO:
+                self._unified_logger.info(message, **fields)
+            elif level == LogLevel.WARNING:
+                self._unified_logger.warning(message, **fields)
+            elif level == LogLevel.ERROR:
+                self._unified_logger.error(message, exception=None, **fields)
+            elif level == LogLevel.CRITICAL:
+                self._unified_logger.critical(message, **fields)
+        except Exception:
+            pass  # 统一日志器异常不应影响本地日志
 
     def get_records(
         self,

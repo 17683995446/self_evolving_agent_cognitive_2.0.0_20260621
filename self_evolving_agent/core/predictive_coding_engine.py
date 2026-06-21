@@ -1,11 +1,14 @@
 """
 阶段114: 预测编码能力强化 — 多层预测 + 贝叶斯更新
+阶段184: 自上而下预测约束 + 自适应置信度
 
 第一性原理:
 1. 自由能最小化：大脑通过分层模型最小化预测误差
 2. 贝叶斯更新：后验 ∝ 先验 × 似然，精度加权融合
 3. 多层预测：高层预测约束低层，低层误差上传高层
 4. 精度控制：高精度信号驱动强更新，低精度信号被抑制
+5. 自上而下约束（阶段184）：高层概念预测作为低层感知的先验
+6. 自适应置信度（阶段184）：置信度基于历史预测准确率动态调整
 
 强化内容:
 - MultiLayerPredictor: 多层预测模型（感知层→特征层→概念层）
@@ -13,6 +16,8 @@
 - HierarchicalErrorPropagation: 层间误差传播
 - PrecisionControl: 动态精度调节（注意力机制）
 - EnhancedPredictiveCodingEngine: 整合以上能力
+- TopDownPredictor（阶段184）: 高层→低层预测约束传播
+- AdaptiveConfidenceTracker（阶段184）: 基于历史准确率的置信度自适应
 
 向后兼容: 保留原有 PredictiveCodingEngine 接口
 """
@@ -90,6 +95,188 @@ class Correction:
 
 
 # ============================================================
+# 阶段184: 自适应置信度追踪器
+# ============================================================
+
+class AdaptiveConfidenceTracker:
+    """
+    自适应置信度追踪器（阶段184）
+
+    第一性原理：置信度应反映模型的历史预测准确率
+    - 准确率高 → 置信度提升
+    - 准确率低 → 置信度降低
+    - 使用指数加权移动平均（EWMA）追踪准确率趋势
+    """
+
+    def __init__(self, window_size: int = 50, initial_confidence: float = 0.3):
+        self._window_size = window_size
+        self._accuracy_history: deque = deque(maxlen=window_size)
+        self._ewma_accuracy: float = 0.5  # 初始假设50%准确率
+        self._alpha: float = 0.1  # EWMA平滑因子
+        self._base_confidence: float = initial_confidence
+        self._lock = threading.RLock()
+
+    def record_prediction_outcome(self, was_accurate: bool, error_magnitude: float = 0.0) -> None:
+        """
+        记录预测结果
+
+        Args:
+            was_accurate: 预测是否准确（误差低于阈值）
+            error_magnitude: 误差大小（0.0=完美，>0.5=不准确）
+        """
+        with self._lock:
+            # 连续度量：准确=1.0，不准确=0.0，中间值基于误差
+            accuracy_score = max(0.0, 1.0 - error_magnitude)
+            self._accuracy_history.append(accuracy_score)
+            # EWMA更新
+            self._ewma_accuracy = (1 - self._alpha) * self._ewma_accuracy + self._alpha * accuracy_score
+
+    def get_adaptive_confidence(self, layer_precision: float = 0.5) -> float:
+        """
+        获取自适应置信度
+
+        第一性原理：置信度 = 基础置信度 × 历史准确率 × 层精度
+        """
+        with self._lock:
+            if len(self._accuracy_history) < 3:
+                # 数据不足时使用基础置信度
+                return self._base_confidence * layer_precision
+
+            # 自适应置信度 = 基础 + EWMA准确率的增益
+            # 准确率高时置信度可达0.95，准确率低时降至0.1
+            adaptive_component = self._ewma_accuracy * 0.65
+            confidence = (self._base_confidence + adaptive_component) * layer_precision
+            return max(0.05, min(0.95, confidence))
+
+    def get_accuracy_stats(self) -> Dict[str, float]:
+        """获取准确率统计"""
+        with self._lock:
+            if not self._accuracy_history:
+                return {"ewma_accuracy": 0.5, "sample_count": 0, "recent_avg": 0.5}
+            return {
+                "ewma_accuracy": self._ewma_accuracy,
+                "sample_count": len(self._accuracy_history),
+                "recent_avg": sum(self._accuracy_history) / len(self._accuracy_history),
+            }
+
+    def reset(self) -> None:
+        """重置追踪器"""
+        with self._lock:
+            self._accuracy_history.clear()
+            self._ewma_accuracy = 0.5
+
+
+# ============================================================
+# 阶段184: 自上而下预测约束器
+# ============================================================
+
+class TopDownPredictor:
+    """
+    自上而下预测约束器（阶段184）
+
+    第一性原理：在分层预测编码中，高层概念预测为低层感知提供先验约束
+    - 高层（概念层）的预测通过降采样映射到低层（感知层）
+    - 低层预测融合高层先验和自身历史，形成更稳健的预测
+    - 高层精度越高，对低层的约束越强
+    """
+
+    def __init__(self, num_layers: int = 3):
+        self._num_layers = num_layers
+        # 高层→低层的映射权重：高层参数名 → 低层参数名 → 权重
+        self._top_down_weights: Dict[str, Dict[str, float]] = {}
+        # 各层最近的高层预测
+        self._layer_priors: Dict[int, Dict[str, float]] = {}
+        self._lock = threading.RLock()
+
+    def set_top_down_weight(self, high_layer_param: str, low_layer_param: str, weight: float) -> None:
+        """设置高层→低层的映射权重"""
+        with self._lock:
+            if high_layer_param not in self._top_down_weights:
+                self._top_down_weights[high_layer_param] = {}
+            self._top_down_weights[high_layer_param][low_layer_param] = max(-1.0, min(1.0, weight))
+
+    def update_layer_prior(self, layer_id: int, prediction_state: Dict[str, Any]) -> None:
+        """
+        更新层先验（高层预测完成后调用）
+
+        第一性原理：高层预测作为低层的先验约束
+        """
+        with self._lock:
+            # 将预测状态中的数值提取为先验
+            prior: Dict[str, float] = {}
+            for key, value in prediction_state.items():
+                try:
+                    prior[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            self._layer_priors[layer_id] = prior
+
+    def get_top_down_prior(self, target_layer: int) -> Dict[str, float]:
+        """
+        获取对目标层的自上而下先验
+
+        第一性原理：融合所有高于目标层的预测作为先验
+        - 越高层的预测权重越小（距离越远，约束越弱）
+        """
+        with self._lock:
+            combined_prior: Dict[str, float] = {}
+            for source_layer in range(target_layer + 1, self._num_layers):
+                layer_prior = self._layer_priors.get(source_layer, {})
+                # 距离衰减：每层距离衰减因子0.7
+                distance = source_layer - target_layer
+                decay = 0.7 ** distance
+                for key, value in layer_prior.items():
+                    if key in combined_prior:
+                        combined_prior[key] = combined_prior[key] * (1 - decay * 0.3) + value * decay * 0.3
+                    else:
+                        combined_prior[key] = value * decay * 0.3
+            return combined_prior
+
+    def apply_top_down_constraint(
+        self,
+        layer_id: int,
+        predicted_state: Dict[str, Any],
+        layer_precision: float,
+    ) -> Dict[str, Any]:
+        """
+        将自上而下先验应用到低层预测
+
+        第一性原理：低层预测 = α × 自身预测 + (1-α) × 高层先验
+        - α = 层精度（精度高→更信任自身预测）
+        """
+        with self._lock:
+            top_down_prior = self.get_top_down_prior(layer_id)
+            if not top_down_prior:
+                return predicted_state
+
+            # 融合自身预测与高层先验
+            alpha = max(0.3, min(0.9, layer_precision))  # 自身权重
+            fused_state: Dict[str, Any] = dict(predicted_state)
+
+            for key, prior_value in top_down_prior.items():
+                if key in fused_state:
+                    try:
+                        own_value = float(fused_state[key])
+                        fused_state[key] = alpha * own_value + (1 - alpha) * prior_value
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    # 自身无此键时直接采用先验
+                    fused_state[key] = prior_value
+
+            return fused_state
+
+    def get_weight_stats(self) -> Dict[str, Any]:
+        """获取映射权重统计"""
+        with self._lock:
+            return {
+                "total_mappings": sum(len(v) for v in self._top_down_weights.values()),
+                "layer_priors_count": len(self._layer_priors),
+                "source_params": list(self._top_down_weights.keys()),
+            }
+
+
+# ============================================================
 # 多层预测模型
 # ============================================================
 
@@ -120,9 +307,10 @@ class MultiLayerPredictor:
     - Layer 2 (概念层): 高层概念的预测
 
     第一性原理：
-    - 高层预测为低层提供先验
+    - 高层预测为低层提供先验（阶段184：TopDownPredictor）
     - 低层误差上传到高层更新高层模型
     - 精度决定信息流方向（精度加权）
+    - 置信度基于历史准确率自适应（阶段184：AdaptiveConfidenceTracker）
     """
 
     def __init__(self, num_layers: int = 3):
@@ -134,11 +322,26 @@ class MultiLayerPredictor:
             for i in range(num_layers)
         ]
         self._lock = threading.RLock()
+        # 阶段184新增：自上而下预测约束器
+        self._top_down = TopDownPredictor(num_layers=num_layers)
+        # 阶段184新增：自适应置信度追踪器
+        self._confidence_tracker = AdaptiveConfidenceTracker()
 
     def predict(self, module_id: str, current_state: Dict[str, Any]) -> Optional[Prediction]:
-        """生成多层预测"""
+        """
+        生成多层预测（阶段184增强：自上而下约束）
+
+        第一性原理：先从高层生成预测，再传播到低层作为先验
+        """
         with self._lock:
-            # 从感知层开始，逐层向上生成预测
+            # 阶段184：先从最高层开始预测，建立自上而下先验
+            for layer in reversed(self.layers):
+                prediction = self._predict_layer(layer, module_id, current_state)
+                if prediction is not None:
+                    # 更新该层的先验（供低层使用）
+                    self._top_down.update_layer_prior(layer.layer_id, prediction.predicted_state)
+
+            # 从感知层开始，逐层向上生成最终预测
             best_prediction = None
             best_confidence = 0.0
 
@@ -156,14 +359,20 @@ class MultiLayerPredictor:
         module_id: str,
         current_state: Dict[str, Any],
     ) -> Optional[Prediction]:
-        """在单层生成预测"""
+        """在单层生成预测（阶段184增强：自适应置信度 + 自上而下约束）"""
         if not layer.parameters and not layer.prediction_history:
             # 无参数时，使用当前状态作为预测（零阶预测）
+            # 阶段184：应用自上而下约束
+            constrained_state = self._top_down.apply_top_down_constraint(
+                layer.layer_id, dict(current_state), layer.precision
+            )
+            # 阶段184：自适应置信度替代固定0.3
+            confidence = self._confidence_tracker.get_adaptive_confidence(layer.precision)
             return Prediction(
                 prediction_id=f"pred_{module_id}_L{layer.layer_id}_{int(time.time() * 1000000)}",
                 timestamp=time.time(),
-                predicted_state=dict(current_state),
-                confidence=0.3,  # 低置信度
+                predicted_state=constrained_state,
+                confidence=confidence,
                 source=module_id,
                 layer=layer.layer_id,
                 precision_estimate=layer.precision,
@@ -194,8 +403,15 @@ class MultiLayerPredictor:
                 if weight_sum > 0:
                     predicted_state[key] = weighted_sum / weight_sum
 
-            # 置信度基于历史长度和精度
-            confidence = min(0.95, 0.3 + len(history) * 0.05) * layer.precision
+            # 阶段184：应用自上而下约束
+            predicted_state = self._top_down.apply_top_down_constraint(
+                layer.layer_id, predicted_state, layer.precision
+            )
+
+            # 阶段184：置信度基于历史长度、精度和自适应准确率
+            base_confidence = min(0.95, 0.3 + len(history) * 0.05)
+            adaptive_confidence = self._confidence_tracker.get_adaptive_confidence(layer.precision)
+            confidence = max(base_confidence, adaptive_confidence) * layer.precision
 
             return Prediction(
                 prediction_id=f"pred_{module_id}_L{layer.layer_id}_{int(time.time() * 1000000)}",
@@ -214,6 +430,7 @@ class MultiLayerPredictor:
         误差驱动的层间更新
 
         第一性原理：低层误差上传到高层，更新高层模型
+        阶段184：同时更新自适应置信度追踪器
         """
         with self._lock:
             # 更新产生误差的层
@@ -234,6 +451,13 @@ class MultiLayerPredictor:
                 upper_layer = self.layers[upper_layer_idx]
                 # 高层也记录实际状态（抽象化）
                 upper_layer.prediction_history.append(dict(actual_state))
+
+            # 阶段184：记录预测结果到自适应置信度追踪器
+            error_magnitude = error.weighted_error
+            self._confidence_tracker.record_prediction_outcome(
+                was_accurate=error_magnitude < 0.3,
+                error_magnitude=error_magnitude,
+            )
 
 
 # ============================================================
@@ -672,6 +896,9 @@ class PredictiveCodingEngine:
                 "num_layers": len(self._multi_layer.layers),
                 "bayesian_params_count": len(self._param_priors),
                 "layer_stats": self.get_layer_stats(),
+                # 阶段184新增统计
+                "top_down_stats": self._multi_layer._top_down.get_weight_stats(),
+                "confidence_stats": self._multi_layer._confidence_tracker.get_accuracy_stats(),
             }
 
     def clear_history(self) -> None:
@@ -685,6 +912,35 @@ class PredictiveCodingEngine:
             for layer in self._multi_layer.layers:
                 layer.prediction_history.clear()
                 layer.precision = 0.5
+            # 阶段184：重置置信度追踪器
+            self._multi_layer._confidence_tracker.reset()
+
+    # ============================================================
+    # 阶段184新增接口：自上而下约束与自适应置信度
+    # ============================================================
+
+    def set_top_down_weight(self, high_layer_param: str, low_layer_param: str, weight: float) -> None:
+        """
+        设置自上而下映射权重
+
+        第一性原理：高层概念到低层感知的映射关系
+        """
+        self._multi_layer._top_down.set_top_down_weight(high_layer_param, low_layer_param, weight)
+
+    def get_confidence_stats(self) -> Dict[str, float]:
+        """
+        获取自适应置信度统计
+
+        Returns:
+            ewma_accuracy: EWMA准确率
+            sample_count: 样本数
+            recent_avg: 最近平均准确率
+        """
+        return self._multi_layer._confidence_tracker.get_accuracy_stats()
+
+    def get_top_down_stats(self) -> Dict[str, Any]:
+        """获取自上而下约束统计"""
+        return self._multi_layer._top_down.get_weight_stats()
 
 
 # ============================================================

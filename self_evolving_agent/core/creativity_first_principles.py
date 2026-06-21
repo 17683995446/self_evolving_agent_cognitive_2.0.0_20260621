@@ -1,5 +1,6 @@
 """
 阶段122: 创造力强化 — 组合创新 + 类比推理
+阶段187: 结构映射理论增强 — 关系结构映射 + 系统性
 
 第一性原理:
 1. 创造力 = 组合已有概念产生新想法（"组合产生新颖"）
@@ -8,12 +9,15 @@
 4. 创新距离 = 新想法与已有想法的差异度
 5. 创造力可量化：新颖性 + 价值性 + 惊讶度
 6. 涌现：整体大于部分之和
+7. 结构映射（阶段187）：类比基于关系结构而非表面属性
+8. 系统性原则（阶段187）：连通的关系结构优先映射
 
 强化内容:
 - CreativityMetrics: 创造力度量（新颖性、价值性、惊讶度）
 - CombinatorialCreativity: 组合创新引擎
 - AnalogicalReasoning: 类比推理（结构映射）
 - DivergentThinking: 发散思维（变异、交叉授粉）
+- StructureMappingEngine（阶段187）: Gentner结构映射引擎
 - CreativityFirstPrinciplesEngine: 增强
 
 向后兼容: 保留原有 Concept / Combination / ConceptType / 接口
@@ -323,6 +327,254 @@ class CombinatorialCreativity:
 
 
 # ============================================================
+# 阶段187: 结构映射引擎（Gentner结构映射理论）
+# ============================================================
+
+class StructureMappingEngine:
+    """
+    结构映射引擎（阶段187）
+
+    第一性原理（Gentner结构映射理论）：
+    1. 属性匹配：表面特征（属性名/值）的相似度
+    2. 关系匹配：关系结构（属性间的关联）的相似度
+    3. 系统性原则：连通的关系结构比孤立属性优先映射
+    4. 一对一约束：每个源域元素最多映射到一个目标域元素
+
+    与阶段122的区别：
+    - 阶段122仅基于属性名重叠（表面匹配）
+    - 阶段187增加关系结构匹配和系统性评分
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _extract_relations(properties: Dict[str, Any]) -> List[Tuple[str, str, Any]]:
+        """
+        从属性中提取关系
+
+        第一性原理：关系 = 属性间的关联
+        - 数值属性间的关系：大小、比例、顺序
+        - 布尔属性间的关系：共存、互斥
+        - 字符串属性间的关系：包含、相似
+        """
+        relations: List[Tuple[str, str, Any]] = []
+        items = list(properties.items())
+
+        for i, (key1, val1) in enumerate(items):
+            for key2, val2 in items[i + 1:]:
+                # 布尔关系（必须先检查，因为bool是int的子类）
+                if isinstance(val1, bool) and isinstance(val2, bool):
+                    if val1 == val2:
+                        relations.append((key1, "co_present", key2))
+                    else:
+                        relations.append((key1, "mutually_exclusive", key2))
+                # 数值关系
+                elif isinstance(val1, (int, float)) and not isinstance(val1, bool) and \
+                     isinstance(val2, (int, float)) and not isinstance(val2, bool):
+                    if val1 > val2:
+                        relations.append((key1, "greater_than", key2))
+                    elif val1 < val2:
+                        relations.append((key1, "less_than", key2))
+                    else:
+                        relations.append((key1, "equal_to", key2))
+                # 字符串关系
+                elif isinstance(val1, str) and isinstance(val2, str):
+                    if val1 in val2:
+                        relations.append((key1, "contained_in", key2))
+                    elif val2 in val1:
+                        relations.append((key2, "contained_in", key1))
+
+        return relations
+
+    @staticmethod
+    def _compute_attribute_similarity(
+        source_props: Dict[str, Any],
+        target_props: Dict[str, Any],
+    ) -> Tuple[Dict[str, str], float]:
+        """
+        计算属性相似度
+
+        Returns:
+            (mapped_attributes, attribute_similarity)
+        """
+        source_keys = set(source_props.keys())
+        target_keys = set(target_props.keys())
+
+        # 完全匹配的属性名
+        exact_match = source_keys & target_keys
+
+        # 值也匹配的属性
+        value_match = 0
+        mapped: Dict[str, str] = {}
+        for key in exact_match:
+            mapped[key] = key
+            sv = source_props[key]
+            tv = target_props[key]
+            if type(sv) == type(tv):
+                if sv == tv:
+                    value_match += 1
+                elif isinstance(sv, (int, float)) and isinstance(tv, (int, float)):
+                    # 数值接近匹配
+                    if abs(sv - tv) < 0.1 * max(abs(sv), abs(tv), 1):
+                        value_match += 0.5
+
+        # 相似度 = 值匹配数 / 并集大小
+        union_size = len(source_keys | target_keys)
+        if union_size == 0:
+            return mapped, 0.0
+
+        similarity = (len(exact_match) * 0.5 + value_match * 0.5) / union_size
+        return mapped, min(1.0, similarity)
+
+    @staticmethod
+    def _compute_relation_similarity(
+        source_relations: List[Tuple[str, str, Any]],
+        target_relations: List[Tuple[str, str, Any]],
+    ) -> Tuple[List[str], float]:
+        """
+        计算关系结构相似度
+
+        第一性原理：
+        - 关系类型匹配（如"greater_than"匹配"greater_than"）
+        - 系统性原则：连通的关系结构得分更高
+
+        Returns:
+            (matched_relation_types, relation_similarity)
+        """
+        if not source_relations or not target_relations:
+            return [], 0.0
+
+        # 提取关系类型
+        source_types = [r[1] for r in source_relations]
+        target_types = [r[1] for r in target_relations]
+
+        # 共同关系类型
+        common_types = set(source_types) & set(target_types)
+        if not common_types:
+            return [], 0.0
+
+        # 关系类型匹配数
+        source_type_counts: Dict[str, int] = {}
+        for t in source_types:
+            source_type_counts[t] = source_type_counts.get(t, 0) + 1
+
+        target_type_counts: Dict[str, int] = {}
+        for t in target_types:
+            target_type_counts[t] = target_type_counts.get(t, 0) + 1
+
+        matched_count = 0
+        for t in common_types:
+            matched_count += min(source_type_counts[t], target_type_counts[t])
+
+        # 系统性加分：多种关系类型匹配 → 更高系统性
+        systematicity_bonus = min(0.2, len(common_types) * 0.05)
+
+        # 关系相似度 = 匹配数 / 较大关系集大小 + 系统性加分
+        max_relations = max(len(source_relations), len(target_relations))
+        similarity = matched_count / max_relations + systematicity_bonus
+
+        return list(common_types), min(1.0, similarity)
+
+    def map_structure(
+        self,
+        source_props: Dict[str, Any],
+        target_props: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        结构映射（阶段187核心方法）
+
+        第一性原理：
+        1. 提取源域和目标域的关系结构
+        2. 计算属性相似度和关系相似度
+        3. 系统性原则：关系相似度权重 > 属性相似度
+        4. 综合相似度 = w1 × 属性相似度 + w2 × 关系相似度
+
+        Returns:
+            {
+                "mapped_properties": {source_prop: target_prop},
+                "similarity": 综合相似度,
+                "attribute_similarity": 属性相似度,
+                "relation_similarity": 关系相似度,
+                "transferable_relations": 可迁移关系类型,
+                "systematicity": 系统性评分,
+            }
+        """
+        with self._lock:
+            # 步骤1：属性匹配
+            mapped_attrs, attr_sim = self._compute_attribute_similarity(
+                source_props, target_props
+            )
+
+            # 步骤2：关系提取
+            source_relations = self._extract_relations(source_props)
+            target_relations = self._extract_relations(target_props)
+
+            # 步骤3：关系匹配
+            matched_types, rel_sim = self._compute_relation_similarity(
+                source_relations, target_relations
+            )
+
+            # 步骤4：系统性评分
+            # 系统性 = 连通的关系结构比例
+            systematicity = 0.0
+            if source_relations:
+                # 关系类型多样性 → 系统性
+                unique_types = len(set(r[1] for r in source_relations))
+                systematicity = min(1.0, unique_types * 0.2)
+
+            # 步骤5：综合相似度
+            # 系统性原则：关系相似度权重更高（Gentner理论核心）
+            # w_relation > w_attribute
+            w_attr = 0.3
+            w_rel = 0.5
+            w_sys = 0.2
+
+            overall_sim = (
+                w_attr * attr_sim
+                + w_rel * rel_sim
+                + w_sys * systematicity
+            )
+
+            # 可迁移关系 = 匹配的关系类型
+            transferable = matched_types if matched_types else list(mapped_attrs.keys())
+
+            return {
+                "mapped_properties": mapped_attrs,
+                "similarity": overall_sim,
+                "attribute_similarity": attr_sim,
+                "relation_similarity": rel_sim,
+                "transferable_relations": transferable,
+                "systematicity": systematicity,
+                "source_relation_count": len(source_relations),
+                "target_relation_count": len(target_relations),
+            }
+
+    def find_structural_analogy(
+        self,
+        source: "Concept",
+        target: "Concept",
+    ) -> Optional[AnalogyMapping]:
+        """
+        基于结构映射的类比发现
+
+        第一性原理：优先匹配关系结构而非表面属性
+        """
+        result = self.map_structure(source.properties, target.properties)
+
+        if result["similarity"] <= 0:
+            return None
+
+        return AnalogyMapping(
+            source_concept_id=source.concept_id,
+            target_concept_id=target.concept_id,
+            mapped_properties=result["mapped_properties"],
+            similarity=result["similarity"],
+            transferable_relations=result["transferable_relations"],
+        )
+
+
+# ============================================================
 # 阶段122新增：类比推理（结构映射）
 # ============================================================
 
@@ -334,37 +586,53 @@ class AnalogicalReasoning:
     - 类比 = 将源域的结构关系映射到目标域
     - 结构映射保持关系，忽略表面特征
     - 相似度 = 映射的属性比例
+    - 阶段187增强：关系结构映射 + 系统性原则
     """
 
     def __init__(self):
         self._lock = threading.RLock()
+        # 阶段187：结构映射引擎
+        self._structure_mapper = StructureMappingEngine()
 
     def find_analogy(
         self,
         source: Concept,
         target: Concept,
     ) -> Optional[AnalogyMapping]:
-        """寻找两个概念间的类比映射"""
+        """
+        寻找两个概念间的类比映射（阶段187增强：结构映射）
+
+        第一性原理：
+        - 阶段122：基于属性名重叠
+        - 阶段187：基于关系结构映射 + 系统性原则
+        """
         source_props = set(source.properties.keys())
         target_props = set(target.properties.keys())
 
         # 共同属性
         common = source_props & target_props
-        if not common:
+        if not common and not source_props and not target_props:
             return None
 
-        # 相似度 = 共同属性 / 并集
-        union = source_props | target_props
-        similarity = len(common) / len(union) if union else 0.0
+        # 阶段187：使用结构映射引擎进行深度匹配
+        structure_mapping = self._structure_mapper.map_structure(
+            source.properties, target.properties
+        )
+
+        # 相似度 = 结构映射相似度（优于简单属性重叠）
+        if structure_mapping["similarity"] > 0:
+            similarity = structure_mapping["similarity"]
+            mapped = structure_mapping["mapped_properties"]
+            transferable = structure_mapping["transferable_relations"]
+        else:
+            # 退化为属性重叠计算
+            union = source_props | target_props
+            similarity = len(common) / len(union) if union else 0.0
+            mapped = {p: p for p in common}
+            transferable = list(common)
 
         if similarity <= 0.0:
             return None
-
-        # 构建映射
-        mapped: Dict[str, str] = {p: p for p in common}
-
-        # 可迁移关系（共同属性）
-        transferable = list(common)
 
         return AnalogyMapping(
             source_concept_id=source.concept_id,
@@ -833,6 +1101,46 @@ class CreativityFirstPrinciplesEngine:
     def get_analogical_engine(self) -> AnalogicalReasoning:
         """获取类比推理引擎"""
         return self._analogical
+
+    # ============================================================
+    # 阶段187新增：结构映射接口
+    # ============================================================
+
+    def map_structure(
+        self,
+        source_id: str,
+        target_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        结构映射分析（阶段187）
+
+        第一性原理：返回详细的结构映射信息，包括属性相似度和关系相似度
+        """
+        with self._lock:
+            source = self._concepts.get(source_id)
+            target = self._concepts.get(target_id)
+        if source is None or target is None:
+            return None
+        return self._analogical._structure_mapper.map_structure(
+            source.properties, target.properties
+        )
+
+    def find_structural_analogy(
+        self,
+        source_id: str,
+        target_id: str,
+    ) -> Optional[AnalogyMapping]:
+        """
+        基于结构映射的类比发现（阶段187）
+
+        第一性原理：优先匹配关系结构而非表面属性
+        """
+        with self._lock:
+            source = self._concepts.get(source_id)
+            target = self._concepts.get(target_id)
+        if source is None or target is None:
+            return None
+        return self._analogical._structure_mapper.find_structural_analogy(source, target)
 
     # ============================================================
     # 阶段122新增：发散思维接口
